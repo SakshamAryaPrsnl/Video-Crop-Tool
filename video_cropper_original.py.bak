@@ -1,0 +1,439 @@
+"""
+Video Frame Cropper
+-------------------
+Drag a crop rectangle on the preview, then click "Crop & Save".
+Requires: pip install opencv-python Pillow
+Requires: pip install opencv-python Pillow
+"""
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import subprocess
+import threading
+import os
+import sys
+
+try:
+    import cv2
+    from PIL import Image, ImageTk
+except ImportError:
+    import subprocess as _sp
+    _sp.run([sys.executable, "-m", "pip", "install", "opencv-python", "Pillow",
+             "--break-system-packages", "-q"])
+    import cv2
+    from PIL import Image, ImageTk
+
+
+FFMPEG = r"C:\Users\Saksham\Desktop\SakshamFiles\Application\iTFlow2\iTFlow.UI\bin\ReleaseBeta\bmptoavi\ffmpeg.exe"
+
+CANVAS_W = 720
+CANVAS_H = 480
+PANEL_W  = 220
+
+
+def check_ffmpeg():
+    try:
+        subprocess.run([FFMPEG, "-version"], capture_output=True, check=True)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+class VideoCropper:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Video Cropper")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#1e1e2e")
+
+        # State
+        self.video_path = None
+        self.cap = None
+        self.frame_count = 0
+        self.orig_w = 0
+        self.orig_h = 0
+        self.scale = 1.0
+        self.photo = None
+
+        # Crop rectangle (canvas coords)
+        self._rect_id = None
+        self._drag_start = None
+        self._cx0 = self._cy0 = self._cx1 = self._cy1 = 0
+        self._offset_x = 0
+        self._offset_y = 0
+
+        self._build_ui()
+
+    # ------------------------------------------------------------------ UI --
+
+    def _build_ui(self):
+        root = self.root
+
+        # ── top bar ──────────────────────────────────────────────────────────
+        top = tk.Frame(root, bg="#1e1e2e", pady=8, padx=10)
+        top.pack(fill="x")
+
+        self._btn_open = tk.Button(
+            top, text="Open Video", command=self._open_video,
+            bg="#89b4fa", fg="#1e1e2e", font=("Helvetica", 11, "bold"),
+            relief="flat", padx=14, pady=4, cursor="hand2"
+        )
+        self._btn_open.pack(side="left")
+
+        self._lbl_file = tk.Label(
+            top, text="No file loaded", bg="#1e1e2e", fg="#cdd6f4",
+            font=("Helvetica", 10), anchor="w"
+        )
+        self._lbl_file.pack(side="left", padx=12)
+
+        # ── main area ────────────────────────────────────────────────────────
+        main = tk.Frame(root, bg="#1e1e2e")
+        main.pack(fill="both", expand=True, padx=10)
+
+        # Canvas
+        self._canvas = tk.Canvas(
+            main, width=CANVAS_W, height=CANVAS_H,
+            bg="#181825", highlightthickness=1, highlightbackground="#45475a",
+            cursor="crosshair"
+        )
+        self._canvas.pack(side="left")
+
+        self._canvas.bind("<ButtonPress-1>",   self._on_press)
+        self._canvas.bind("<B1-Motion>",        self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>", self._on_release)
+
+        # Placeholder text
+        self._placeholder = self._canvas.create_text(
+            CANVAS_W // 2, CANVAS_H // 2,
+            text="Open a video file to begin",
+            fill="#585b70", font=("Helvetica", 14)
+        )
+
+        # Right panel
+        panel = tk.Frame(main, bg="#181825", width=PANEL_W, padx=14, pady=14)
+        panel.pack(side="left", fill="y", padx=(10, 0))
+        panel.pack_propagate(False)
+
+        def label(parent, text, small=False):
+            tk.Label(parent, text=text, bg="#181825",
+                     fg="#a6adc8" if small else "#cdd6f4",
+                     font=("Helvetica", 9 if small else 10)).pack(anchor="w", pady=(10, 2))
+
+        def entry_row(parent, var, lbl):
+            f = tk.Frame(parent, bg="#181825")
+            f.pack(fill="x", pady=2)
+            tk.Label(f, text=lbl, bg="#181825", fg="#a6adc8",
+                     font=("Helvetica", 10), width=4, anchor="w").pack(side="left")
+            e = tk.Entry(f, textvariable=var, bg="#313244", fg="#cdd6f4",
+                         insertbackground="#cdd6f4", relief="flat",
+                         font=("Helvetica", 10), width=8)
+            e.pack(side="left", ipady=4, padx=(4, 0))
+            return e
+
+        label(panel, "Crop Region")
+        self._var_x = tk.IntVar(value=0)
+        self._var_y = tk.IntVar(value=0)
+        self._var_w = tk.IntVar(value=0)
+        self._var_h = tk.IntVar(value=0)
+        entry_row(panel, self._var_x, "X")
+        entry_row(panel, self._var_y, "Y")
+        entry_row(panel, self._var_w, "W")
+        entry_row(panel, self._var_h, "H")
+
+        tk.Button(
+            panel, text="Apply", command=self._apply_manual,
+            bg="#45475a", fg="#cdd6f4", relief="flat",
+            font=("Helvetica", 9), padx=8, pady=3, cursor="hand2"
+        ).pack(anchor="w", pady=(4, 0))
+
+        label(panel, "Preview Frame", small=True)
+        self._var_frame = tk.IntVar(value=0)
+        self._slider = ttk.Scale(
+            panel, from_=0, to=1, orient="horizontal",
+            variable=self._var_frame, command=self._on_seek
+        )
+        self._slider.pack(fill="x", pady=(2, 0))
+        self._lbl_frame = tk.Label(
+            panel, text="Frame: 0 / 0", bg="#181825",
+            fg="#585b70", font=("Helvetica", 9)
+        )
+        self._lbl_frame.pack(anchor="w")
+
+        # Video info
+        label(panel, "Video Info", small=True)
+        self._lbl_info = tk.Label(
+            panel, text="—", bg="#181825", fg="#585b70",
+            font=("Helvetica", 9), justify="left", anchor="w", wraplength=190
+        )
+        self._lbl_info.pack(anchor="w")
+
+        # Spacer
+        tk.Frame(panel, bg="#181825").pack(expand=True, fill="both")
+
+        # Export button
+        self._btn_crop = tk.Button(
+            panel, text="✂  Crop & Save MP4",
+            command=self._export,
+            bg="#a6e3a1", fg="#1e1e2e",
+            font=("Helvetica", 11, "bold"),
+            relief="flat", pady=8, cursor="hand2", state="disabled"
+        )
+        self._btn_crop.pack(fill="x", pady=(0, 6))
+
+        # ── status bar ───────────────────────────────────────────────────────
+        self._status = tk.Label(
+            root, text="Ready", bg="#181825", fg="#585b70",
+            font=("Helvetica", 9), anchor="w", padx=10, pady=4
+        )
+        self._status.pack(fill="x")
+
+        # ── progress bar ─────────────────────────────────────────────────────
+        self._progress = ttk.Progressbar(root, mode="indeterminate", length=CANVAS_W + PANEL_W + 10)
+        # not packed until needed
+
+    # --------------------------------------------------------- file / frame --
+
+    def _open_video(self):
+        path = filedialog.askopenfilename(
+            title="Select video file",
+            filetypes=[
+                ("Video files", "*.mp4 *.mov *.avi *.mkv *.webm *.m4v *.wmv"),
+                ("All files", "*.*")
+            ]
+        )
+        if not path:
+            return
+        if self.cap:
+            self.cap.release()
+
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            messagebox.showerror("Error", "Could not open video file.")
+            return
+
+        self.video_path = path
+        self.orig_w  = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.orig_h  = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+
+        self._lbl_file.config(text=os.path.basename(path))
+        self._slider.config(to=max(0, self.frame_count - 1))
+        self._var_frame.set(0)
+        self._lbl_info.config(
+            text=f"{self.orig_w}×{self.orig_h}  {fps:.2f} fps\n{self.frame_count} frames"
+        )
+
+        # Reset crop — user must draw a region
+        self._var_x.set(0); self._var_y.set(0)
+        self._var_w.set(0); self._var_h.set(0)
+        self._cx0 = self._cy0 = self._cx1 = self._cy1 = 0
+
+        self._show_frame(0)
+        self._btn_crop.config(state="normal")
+        self._status.config(text="Drag to select crop region. Press 'Crop & Save' when ready.")
+
+    def _show_frame(self, n):
+        if not self.cap:
+            return
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, n)
+        ok, frame = self.cap.read()
+        if not ok:
+            return
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+
+        # Scale to fit canvas
+        scale_x = CANVAS_W / self.orig_w
+        scale_y = CANVAS_H / self.orig_h
+        self.scale = min(scale_x, scale_y)
+        disp_w = int(self.orig_w * self.scale)
+        disp_h = int(self.orig_h * self.scale)
+        self._offset_x = (CANVAS_W - disp_w) // 2
+        self._offset_y = (CANVAS_H - disp_h) // 2
+
+        img = img.resize((disp_w, disp_h), Image.LANCZOS)
+        self.photo = ImageTk.PhotoImage(img)
+
+        self._canvas.delete("all")
+        self._canvas.create_image(
+            self._offset_x, self._offset_y,
+            anchor="nw", image=self.photo
+        )
+
+        self._lbl_frame.config(text=f"Frame: {n} / {self.frame_count - 1}")
+        self._redraw_rect()
+
+    def _on_seek(self, val):
+        if self.cap:
+            self._show_frame(int(float(val)))
+
+    # -------------------------------------------------------- crop drawing --
+
+    def _canvas_to_video(self, cx, cy):
+        """Convert canvas coords to video pixel coords."""
+        vx = (cx - self._offset_x) / self.scale
+        vy = (cy - self._offset_y) / self.scale
+        vx = max(0, min(self.orig_w,  int(vx)))
+        vy = max(0, min(self.orig_h, int(vy)))
+        return vx, vy
+
+    def _video_to_canvas(self, vx, vy):
+        cx = int(vx * self.scale) + self._offset_x
+        cy = int(vy * self.scale) + self._offset_y
+        return cx, cy
+
+    def _on_press(self, event):
+        if not self.cap:
+            return
+        self._drag_start = (event.x, event.y)
+        self._cx0, self._cy0 = event.x, event.y
+        self._cx1, self._cy1 = event.x, event.y
+
+    def _on_drag(self, event):
+        if not self._drag_start:
+            return
+        self._cx1, self._cy1 = event.x, event.y
+        self._redraw_rect()
+        self._update_vars_from_canvas()
+
+    def _on_release(self, event):
+        if not self._drag_start:
+            return
+        self._cx1, self._cy1 = event.x, event.y
+        self._drag_start = None
+        self._redraw_rect()
+        self._update_vars_from_canvas()
+
+    def _redraw_rect(self):
+        if self._rect_id:
+            self._canvas.delete(self._rect_id)
+
+        # Draw from stored canvas coords
+        x0, y0 = self._cx0, self._cy0
+        x1, y1 = self._cx1, self._cy1
+
+        if x0 == x1 and y0 == y1:
+            return
+
+        # Semi-transparent overlay via stipple
+        self._rect_id = self._canvas.create_rectangle(
+            min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+            outline="#f38ba8", width=2, dash=(4, 3)
+        )
+
+    def _update_vars_from_canvas(self):
+        vx0, vy0 = self._canvas_to_video(self._cx0, self._cy0)
+        vx1, vy1 = self._canvas_to_video(self._cx1, self._cy1)
+        x = min(vx0, vx1); y = min(vy0, vy1)
+        w = abs(vx1 - vx0); h = abs(vy1 - vy0)
+        # Snap to even numbers (ffmpeg prefers even dims)
+        w = w - (w % 2); h = h - (h % 2)
+        self._var_x.set(x); self._var_y.set(y)
+        self._var_w.set(w); self._var_h.set(h)
+
+    def _apply_manual(self):
+        """Redraw rectangle from typed values."""
+        if not self.cap:
+            return
+        x = self._var_x.get(); y = self._var_y.get()
+        w = self._var_w.get(); h = self._var_h.get()
+        self._cx0, self._cy0 = self._video_to_canvas(x, y)
+        self._cx1, self._cy1 = self._video_to_canvas(x + w, y + h)
+        self._redraw_rect()
+
+    # ------------------------------------------------------------- export --
+
+    def _export(self):
+        if not self.video_path:
+            return
+
+        x = self._var_x.get(); y = self._var_y.get()
+        w = self._var_w.get(); h = self._var_h.get()
+
+        if w < 2 or h < 2:
+            messagebox.showwarning("No crop selected",
+                                   "Please drag a crop region on the preview first.")
+            return
+
+        # Ensure even dimensions
+        w = w - (w % 2); h = h - (h % 2)
+
+        default_name = os.path.splitext(os.path.basename(self.video_path))[0] + "_cropped.mp4"
+        out_path = filedialog.asksaveasfilename(
+            title="Save cropped video",
+            initialfile=default_name,
+            defaultextension=".mp4",
+            filetypes=[("MP4 video", "*.mp4")]
+        )
+        if not out_path:
+            return
+
+        self._btn_crop.config(state="disabled")
+        self._btn_open.config(state="disabled")
+        self._progress.pack(fill="x", padx=10, pady=(0, 4))
+        self._progress.start(12)
+        self._status.config(text=f"Cropping… crop={w}×{h} at ({x},{y})")
+
+        def run():
+            cmd = [
+                FFMPEG, "-y",
+                "-i", self.video_path,
+                "-vf", f"crop={w}:{h}:{x}:{y}",
+                "-c:v", "libx264", "-preset", "fast",
+                "-crf", "18",
+                "-c:a", "aac",
+                out_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.root.after(0, lambda: self._done(result, out_path))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _done(self, result, out_path):
+        self._progress.stop()
+        self._progress.pack_forget()
+        self._btn_crop.config(state="normal")
+        self._btn_open.config(state="normal")
+
+        if result.returncode == 0:
+            self._status.config(text=f"Saved: {os.path.basename(out_path)}")
+            messagebox.showinfo("Done", f"Saved to:\n{out_path}")
+        else:
+            self._status.config(text="Export failed — see error dialog.")
+            messagebox.showerror("ffmpeg error",
+                                 result.stderr[-1000:] if result.stderr else "Unknown error")
+
+    def __del__(self):
+        if self.cap:
+            self.cap.release()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    if not check_ffmpeg():
+        import tkinter as _tk
+        _r = _tk.Tk(); _r.withdraw()
+        messagebox.showerror(
+            "ffmpeg not found",
+            f"Could not find ffmpeg at:\n{FFMPEG}\n\nPlease check the path is correct."
+        )
+        return
+
+    root = tk.Tk()
+
+    # Style ttk widgets
+    style = ttk.Style()
+    style.theme_use("default")
+    style.configure("TScale", background="#181825", troughcolor="#313244",
+                    sliderlength=14)
+    style.configure("TProgressbar", troughcolor="#313244", background="#a6e3a1")
+
+    app = VideoCropper(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
