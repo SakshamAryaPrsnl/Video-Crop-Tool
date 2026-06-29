@@ -44,12 +44,27 @@ class TkDnD(ctk.CTk, TkinterDnD.DnDWrapper):
         self.TkdndVersion = TkinterDnD._require(self)
 
 
+__version__ = "1.0.0"
+
+
 # ── ffmpeg discovery ─────────────────────────────────────────────────────────
 BUNDLED_FFMPEG = r"C:\Users\Saksham\Desktop\SakshamFiles\Application\iTFlow2\iTFlow.UI\bin\ReleaseBeta\bmptoavi\ffmpeg.exe"
 
+def _app_dir():
+    """Folder of the .exe (frozen build) or this script."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _resource(name):
+    """Path to a bundled asset (PyInstaller _MEIPASS, or the source dir)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
 def find_ffmpeg():
     """Return a usable ffmpeg path, or None."""
-    candidates = [BUNDLED_FFMPEG, shutil.which("ffmpeg")]
+    candidates = [os.path.join(_app_dir(), "ffmpeg.exe"),
+                  BUNDLED_FFMPEG, shutil.which("ffmpeg")]
     for c in candidates:
         if c and os.path.exists(c):
             return c
@@ -110,7 +125,7 @@ class VideoCropper:
         self.root = root
         self.ffmpeg = ffmpeg
 
-        root.title("Video Cropper")
+        root.title(f"Video Cropper {__version__}")
         root.geometry("1180x760")
         root.minsize(940, 620)
         root.configure(fg_color=C["base"])
@@ -1040,6 +1055,10 @@ def main():
 
     ctk.set_appearance_mode("dark")
     root = TkDnD()
+    try:
+        root.iconbitmap(_resource("icon.ico"))
+    except Exception:
+        pass
 
     if not ffmpeg:
         root.withdraw()

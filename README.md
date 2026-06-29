@@ -4,7 +4,7 @@ A small desktop tool for **cropping** and **trimming** video clips. Drag a crop
 box on the preview, set In/Out points to cut the duration, and export an MP4 —
 with a live preview, real progress, and a modern dark UI.
 
-![status](https://img.shields.io/badge/platform-Windows-blue) ![python](https://img.shields.io/badge/python-3.10%2B-green)
+![version](https://img.shields.io/badge/version-1.0.0-informational) ![status](https://img.shields.io/badge/platform-Windows-blue) ![python](https://img.shields.io/badge/python-3.10%2B-green)
 
 ---
 
@@ -31,8 +31,9 @@ with a live preview, real progress, and a modern dark UI.
 ## Requirements
 
 - **Python 3.10+**
-- **ffmpeg** — auto-detected from a bundled location or your system `PATH`; if
-  neither is found you'll be prompted to locate `ffmpeg.exe`.
+- **ffmpeg** — auto-detected in this order: an `ffmpeg.exe` next to the app, a
+  known bundled location, then your system `PATH`. If none is found you'll be
+  prompted to locate `ffmpeg.exe`.
 - Python packages (installed automatically on first run if missing):
   - `opencv-python` — frame decoding for the preview
   - `Pillow` — image display
@@ -89,7 +90,31 @@ python video_cropper.py
 
 ---
 
+## Building a standalone .exe
+
+A Windows executable is produced with [PyInstaller](https://pyinstaller.org):
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --noconfirm --onefile --windowed --name VideoCropper \
+  --icon icon.ico --add-data "icon.ico;." \
+  --collect-all customtkinter --collect-all tkinterdnd2 video_cropper.py
+```
+
+The result is `dist\VideoCropper.exe` — a single self-contained file (no Python
+needed on the target machine); all four Python packages are bundled inside.
+
+**ffmpeg is *not* embedded.** To run the exe on a machine without ffmpeg, place
+an `ffmpeg.exe` in the same folder as `VideoCropper.exe` (it's picked up
+automatically), or let the app prompt you to locate one.
+
+Build artifacts (`build/`, `dist/`, `VideoCropper.spec`) are regenerated each
+build and don't need to be committed.
+
+---
+
 ## Files
 
 - `video_cropper.py` — the application.
+- `icon.ico` — app / executable icon.
 - `video_cropper_original.py.bak` — the original single-draw version, kept as a backup.
