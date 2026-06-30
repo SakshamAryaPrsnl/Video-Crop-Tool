@@ -382,6 +382,37 @@ class VideoCropper:
             text_color=C["subtext"], font=ctk.CTkFont(size=12), justify="left")
         self.lbl_trim.pack(fill="x", padx=8, pady=(6, 0))
 
+        # ── LOOP ─────────────────────────────────────────────────────
+        heading("Loop / repeat")
+        loopf = ctk.CTkFrame(panel, fg_color="transparent")
+        loopf.pack(fill="x", padx=4)
+        self.loop_var = tk.IntVar(value=1)
+
+        ctk.CTkButton(loopf, text="−", width=36, height=32,
+                      command=lambda: self._bump_loop(-1),
+                      fg_color=C["surface2"], hover_color=C["overlay"],
+                      text_color=C["text"], font=ctk.CTkFont(size=16)
+                      ).pack(side="left", padx=(0, 4))
+        self.entry_loop = ctk.CTkEntry(
+            loopf, textvariable=self.loop_var, width=64, height=32,
+            justify="center", fg_color=C["surface2"], border_width=0,
+            text_color=C["text"], font=ctk.CTkFont(size=14, weight="bold"))
+        self.entry_loop.pack(side="left")
+        self.entry_loop.bind("<Return>",   lambda e: self._update_loop_label())
+        self.entry_loop.bind("<FocusOut>", lambda e: self._update_loop_label())
+        ctk.CTkButton(loopf, text="+", width=36, height=32,
+                      command=lambda: self._bump_loop(1),
+                      fg_color=C["surface2"], hover_color=C["overlay"],
+                      text_color=C["text"], font=ctk.CTkFont(size=16)
+                      ).pack(side="left", padx=(4, 8))
+        ctk.CTkLabel(loopf, text="× plays", text_color=C["muted"],
+                     font=ctk.CTkFont(size=12)).pack(side="left")
+
+        self.lbl_loop = ctk.CTkLabel(
+            panel, text="Output ≈ 0:00.00  (1× — no loop)",
+            text_color=C["subtext"], font=ctk.CTkFont(size=12), anchor="w")
+        self.lbl_loop.pack(fill="x", padx=8, pady=(6, 0))
+
         # ── OUTPUT ───────────────────────────────────────────────────
         heading("Output quality")
         self.crf_var = tk.IntVar(value=18)
@@ -484,6 +515,7 @@ class VideoCropper:
         self._show_frame(0)
         self._sync_crop_fields()
         self._update_trim_label()
+        self._update_loop_label()
         self._update_controls_enabled()
         self._set_status("Drag on the preview to draw a crop · grab handles to adjust",
                          C["subtext"])
@@ -864,7 +896,7 @@ class VideoCropper:
         self.in_frame = self.cur_frame_idx
         if self.out_frame <= self.in_frame:
             self.out_frame = min(self.frame_count - 1, self.in_frame + 1)
-        self._update_trim_label(); self._draw_timeline()
+        self._update_trim_label(); self._update_loop_label(); self._draw_timeline()
 
     def _set_out(self):
         if not self.cap:
@@ -872,7 +904,30 @@ class VideoCropper:
         self.out_frame = self.cur_frame_idx
         if self.in_frame >= self.out_frame:
             self.in_frame = max(0, self.out_frame - 1)
-        self._update_trim_label(); self._draw_timeline()
+        self._update_trim_label(); self._update_loop_label(); self._draw_timeline()
+
+    # ═══════════════════════════════════════════════════════ loop ══
+    def _loop_count(self):
+        try:
+            n = int(float(self.loop_var.get()))
+        except (ValueError, tk.TclError):
+            n = 1
+        return max(1, min(999, n))
+
+    def _bump_loop(self, delta):
+        self.loop_var.set(max(1, min(999, self._loop_count() + delta)))
+        self._update_loop_label()
+
+    def _update_loop_label(self):
+        n = self._loop_count()
+        self.loop_var.set(n)                       # normalise the displayed value
+        base = ((self.out_frame - self.in_frame + 1) / self.fps) if self.cap else 0
+        total = max(0, base) * n
+        if n <= 1:
+            self.lbl_loop.configure(text=f"Output ≈ {fmt_time(total)}  (1× — no loop)")
+        else:
+            self.lbl_loop.configure(
+                text=f"Output ≈ {fmt_time(total)}  ({n}× of {fmt_time(base)})")
 
     def _update_trim_label(self):
         ti = self.in_frame / self.fps
@@ -938,18 +993,7 @@ class VideoCropper:
         ss = self.in_frame / self.fps
         dur = (self.out_frame - self.in_frame + 1) / self.fps
         full = (x == 0 and y == 0 and w >= self.orig_w - 1 and h >= self.orig_h - 1)
-
-        cmd = [self.ffmpeg, "-y", "-i", self.video_path,
-               "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}"]
-        if not full:
-            cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
-        cmd += ["-c:v", "libx264", "-preset", "fast",
-                "-crf", str(self.crf_var.get())]
-        if self.audio_var.get():
-            cmd += ["-c:a", "aac"]
-        else:
-            cmd += ["-an"]
-        cmd += ["-progress", "pipe:1", "-nostats", out_path]
+        count = self._loop_count()
 
         self._cancelled = False
         self.btn_export.configure(state="disabled")
@@ -957,19 +1001,60 @@ class VideoCropper:
         self.btn_cancel.pack(fill="x", padx=4, pady=(0, 6))
         self.progress.grid(row=0, column=1, sticky="e", padx=16, pady=10)
         self.progress.set(0)
-        self._set_status(f"Cropping → {w}×{h} · {fmt_time(dur)} clip", C["yellow"])
 
-        threading.Thread(target=self._run_ffmpeg, args=(cmd, out_path, dur),
-                         daemon=True).start()
+        threading.Thread(
+            target=self._do_export,
+            args=(out_path, ss, dur, x, y, w, h, full, count),
+            daemon=True).start()
 
-    def _run_ffmpeg(self, cmd, out_path, total):
+    def _encode_cmd(self, src, dst, ss, dur, full, x, y, w, h):
+        cmd = [self.ffmpeg, "-y", "-i", src, "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}"]
+        if not full:
+            cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
+        cmd += ["-c:v", "libx264", "-preset", "fast",
+                "-crf", str(self.crf_var.get())]
+        cmd += ["-c:a", "aac"] if self.audio_var.get() else ["-an"]
+        cmd += ["-progress", "pipe:1", "-nostats", dst]
+        return cmd
+
+    def _do_export(self, out_path, ss, dur, x, y, w, h, full, count):
+        # Single pass: just crop/trim straight to the destination.
+        if count <= 1:
+            cmd = self._encode_cmd(self.video_path, out_path, ss, dur,
+                                   full, x, y, w, h)
+            rc, err = self._run_proc(cmd, dur, 0.0, 1.0, f"Cropping → {w}×{h}")
+            self.root.after(0, lambda: self._done(rc, err, out_path))
+            return
+
+        # Looping: encode the clip once, then repeat it losslessly (stream copy).
+        tmp = out_path + ".loopbase.mp4"
+        try:
+            cmd1 = self._encode_cmd(self.video_path, tmp, ss, dur,
+                                    full, x, y, w, h)
+            rc, err = self._run_proc(cmd1, dur, 0.0, 0.8,
+                                     f"Cropping (1/2) → {w}×{h}")
+            if rc != 0 or self._cancelled:
+                self.root.after(0, lambda: self._done(rc, err, out_path))
+                return
+            total2 = dur * count
+            cmd2 = [self.ffmpeg, "-y", "-stream_loop", str(count - 1), "-i", tmp,
+                    "-c", "copy", "-progress", "pipe:1", "-nostats", out_path]
+            rc2, err2 = self._run_proc(cmd2, total2, 0.8, 1.0,
+                                       f"Looping ×{count} (2/2)")
+            self.root.after(0, lambda: self._done(rc2, err2 or err, out_path))
+        finally:
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+
+    def _run_proc(self, cmd, total, lo, hi, label):
+        """Run one ffmpeg pass, mapping its progress into [lo, hi]."""
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1, creationflags=_NO_WINDOW)
         except Exception as exc:
-            self.root.after(0, lambda: self._done(1, str(exc), out_path))
-            return
+            return 1, str(exc)
         self._proc = proc
 
         err = []
@@ -979,16 +1064,15 @@ class VideoCropper:
 
         for line in proc.stdout:
             line = line.strip()
-            if line.startswith("out_time="):
+            if line.startswith("out_time=") and total > 0:
                 t = self._parse_time(line.split("=", 1)[1])
-                if t is not None and total > 0:
-                    frac = max(0, min(1, t / total))
-                    self.root.after(0, lambda f=frac, t=t:
-                                    self._on_progress(f, t, total))
+                if t is not None:
+                    frac = lo + (hi - lo) * max(0, min(1, t / total))
+                    self.root.after(0, lambda f=frac, lbl=label:
+                                    self._on_progress(f, lbl))
         proc.wait()
         self._proc = None
-        rc = proc.returncode
-        self.root.after(0, lambda: self._done(rc, "".join(err), out_path))
+        return proc.returncode, "".join(err)
 
     @staticmethod
     def _parse_time(text):
@@ -1000,11 +1084,9 @@ class VideoCropper:
         except (ValueError, AttributeError):
             return None
 
-    def _on_progress(self, frac, done, total):
+    def _on_progress(self, frac, label):
         self.progress.set(frac)
-        self._set_status(
-            f"Cropping… {frac * 100:4.0f}%   "
-            f"({fmt_time(done)} / {fmt_time(total)})", C["yellow"])
+        self._set_status(f"{label}…  {frac * 100:3.0f}%", C["yellow"])
 
     def _cancel(self):
         if self._proc:

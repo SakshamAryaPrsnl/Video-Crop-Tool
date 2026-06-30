@@ -17,6 +17,9 @@ with a live preview, real progress, and a modern dark UI.
   keeps its ratio as you drag.
 - **Trim in time** — set In/Out points to cut the clip's duration, not just the
   frame. A timeline bar shows the range, markers, and playhead.
+- **Loop / repeat** — repeat the cropped+trimmed clip *N* times to make a longer
+  video. The clip is encoded once and the copies are stitched losslessly, with a
+  live estimate of the resulting output length.
 - **Playback** — Play/Pause the preview (loops within the trimmed range) so you
   can check exactly what will be exported.
 - **Drag & drop** — drop a video file anywhere on the window to open it.
@@ -60,8 +63,10 @@ python video_cropper.py
    values. *Full frame* resets to the whole frame; *Center* centers the current box.
 3. **Trim (optional)** — scrub to a frame and press *Set In* (`i`); scrub to the
    end and press *Set Out* (`o`). Use Play to preview the trimmed range.
-4. **Choose output** — set the quality (CRF) and whether to keep audio.
-5. **Export** — click *Crop & Save MP4*, pick a destination, and watch the
+4. **Loop (optional)** — set the *Loop / repeat* count above 1 to repeat the clip
+   that many times; the estimated output length updates as you change it.
+5. **Choose output** — set the quality (CRF) and whether to keep audio.
+6. **Export** — click *Crop & Save MP4*, pick a destination, and watch the
    progress. *Cancel* stops the export and removes the partial file.
 
 ---
